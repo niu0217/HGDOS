@@ -57,7 +57,7 @@ union task_union {
 
 static union task_union init_task = {INIT_TASK,};
 
-long volatile jiffies=0;
+long volatile jiffies=0;	//记录了从开机到当前时间的时钟中断发生次数
 long startup_time=0;
 struct task_struct *current = &(init_task.task);
 struct task_struct *last_task_used_math = NULL;
@@ -115,8 +115,11 @@ void schedule(void)
 					(*p)->alarm = 0;
 				}
 			if (((*p)->signal & ~(_BLOCKABLE & (*p)->blocked)) &&
-			(*p)->state==TASK_INTERRUPTIBLE)
-				(*p)->state=TASK_RUNNING;
+			(*p)->state==TASK_INTERRUPTIBLE) {
+				(*p)->state = TASK_RUNNING;
+				/*阻塞 ==>就绪*/
+				fprintk(3, "%d\tJ\t%d\n", (*p)->pid, jiffies);
+			}
 		}
 
 /* this is the scheduler proper: */
@@ -138,12 +141,27 @@ void schedule(void)
 				(*p)->counter = ((*p)->counter >> 1) +
 						(*p)->priority;
 	}
+	/*编号为next的进程 运行*/
+	if (current->pid != task[next]->pid)
+	{
+		/*时间片到 当前进程从：运行 => 就绪*/
+		if (current->state == TASK_RUNNING)
+			fprintk(3, "%d\tJ\t%d\n", current->pid, jiffies);
+		/*next进程从就绪转化为运行*/
+		fprintk(3, "%d\tR\t%d\n", task[next]->pid, jiffies);
+	}
 	switch_to(next);
 }
 
 int sys_pause(void)
 {
 	current->state = TASK_INTERRUPTIBLE;
+	/*
+	 * 状态：当前进程  运行 => 阻塞
+	 * 行为：进程主动睡眠
+	 */
+	if (current->pid != 0)
+		fprintk(3, "%d\tW\t%d\n", current->pid, jiffies);
 	schedule();
 	return 0;
 }
@@ -159,9 +177,18 @@ void sleep_on(struct task_struct **p)
 	tmp = *p;
 	*p = current;
 	current->state = TASK_UNINTERRUPTIBLE;
+	/*
+	 *当前进程 运行 => 阻塞
+	 */
+	fprintk(3, "%d\tW\t%d\n", current->pid, jiffies);
 	schedule();
-	if (tmp)
+	if (tmp) {
 		tmp->state=0;
+		/*
+		 *原等待队列 第一个进程：睡眠 => 就绪
+		 */
+		fprintk(3, "%d\tJ\t%d\n", tmp->pid, jiffies);
+	}
 }
 
 void interruptible_sleep_on(struct task_struct **p)
@@ -175,20 +202,38 @@ void interruptible_sleep_on(struct task_struct **p)
 	tmp=*p;
 	*p=current;
 repeat:	current->state = TASK_INTERRUPTIBLE;
+	/*
+	 *这一部分属于 唤醒队列中间进程，通过goto实现唤醒 队列头进程 过程中Wait
+	 */
+	fprintk(3, "%d\tW\t%d\n", current->pid, jiffies);
 	schedule();
 	if (*p && *p != current) {
 		(**p).state=0;
+		/*
+		 *当前进程：睡眠 => 就绪
+		 */
+		fprintk(3, "%d\tJ\t%d\n", (*p)->pid, jiffies);
 		goto repeat;
 	}
 	*p=NULL;
-	if (tmp)
-		tmp->state=0;
+	if (tmp) {
+		tmp->state = 0;
+		/*
+		 *原等待队列 第一个进程：睡眠 => 就绪
+		 */
+		fprintk(3, "%d\tJ\t%d\n", tmp->pid, jiffies);
+	}
 }
 
 void wake_up(struct task_struct **p)
 {
 	if (p && *p) {
 		(**p).state=0;
+		/*
+		 *唤醒 最后进入等待序列的 进程
+		 *睡眠 ==> 就绪
+		 */
+		fprintk(3, "%d\tJ\t%d\n", (*p)->pid, jiffies);
 		*p=NULL;
 	}
 }
