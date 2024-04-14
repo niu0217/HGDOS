@@ -45,12 +45,16 @@ EFLAGS		= 0x24
 OLDESP		= 0x28
 OLDSS		= 0x2C
 
+ESP0 = 4                # 内核栈指针 ESP0 位于 tss 这一内存块的偏移地址为 4 的地方
+KERNEL_STACK = 12       # PCB 中用来保存内核栈指针的域
+
 state	= 0		# these are offsets into the task-struct.
 counter	= 4
 priority = 8
-signal	= 12
-sigaction = 16		# MUST be 16 (=len of sigaction)
-blocked = (33*16)
+kernelstack = 12
+signal	= 16
+sigaction = 20		# MUST be 16 (=len of sigaction)
+blocked = (37*16)
 
 # offsets within sigaction
 sa_handler = 0
@@ -67,6 +71,7 @@ nr_system_calls = 72
 .globl system_call,sys_fork,timer_interrupt,sys_execve
 .globl hd_interrupt,floppy_interrupt,parallel_interrupt
 .globl device_not_available, coprocessor_error
+.globl switch_to, first_return_from_kernel
 
 .align 2
 bad_sys_call:
@@ -283,3 +288,52 @@ parallel_interrupt:
 	outb %al,$0x20
 	popl %eax
 	iret
+
+.align 2
+switch_to:
+    pushl %ebp
+    movl %esp,%ebp
+    pushl %ecx
+    pushl %ebx
+    pushl %eax
+    movl 8(%ebp),%ebx	# ebx此时保存的是下一个进程PCB的参数 8(%ebp)取到的是pnext的值
+    cmpl %ebx,current	# 将ebx与current(当前进程PCB的参数)进行比较
+    je 1f
+# 切换PCB
+    movl %ebx,%eax	
+	xchgl %eax,current	# eax指向当前进程 current指向下一个进程 ebx也指向下一个进程
+# 重写TSS指针
+    movl tss,%ecx	# 这个tss是0号进程的tss 是个全局变量 所有进程共用这个tss
+    addl $4096,%ebx
+    movl %ebx,ESP0(%ecx)	# ESP0=4 tss中内核栈指针esp0就放在偏移为4的地方
+# 切换内核栈
+    movl %esp,KERNEL_STACK(%eax)	# 将寄存器esp（内核栈使用到当前情况时的栈顶位置）的值保存到当前PCB中
+    movl 8(%ebp),%ebx	# 再取一下ebx，因为前面修改过ebx的值
+    movl KERNEL_STACK(%ebx),%esp	# 从下一个PCB中的对应位置上取出保存的内核栈栈顶放入esp寄存器
+# 切换LDT
+	movl 12(%ebp), %ecx
+    lldt %cx
+    movl $0x17,%ecx	# 切换LDT之后需要重新设置寄存器fs的值
+	mov %cx,%fs
+# 这一段先不用管
+    cmpl %eax,last_task_used_math 
+    jne 1f
+    clts
+
+1: 
+	popl %eax
+    popl %ebx
+    popl %ecx
+    popl %ebp
+ret
+
+.align 2
+first_return_from_kernel:
+    popl %edx
+    popl %edi
+    popl %esi
+    pop %gs
+    pop %fs
+    pop %es
+    pop %ds
+    iret

@@ -49,6 +49,7 @@ extern void mem_use(void);
 
 extern int timer_interrupt(void);
 extern int system_call(void);
+extern long switch_to(struct task_struct *p, unsigned long address);
 
 union task_union {
 	struct task_struct task;
@@ -63,6 +64,10 @@ struct task_struct *current = &(init_task.task);
 struct task_struct *last_task_used_math = NULL;
 
 struct task_struct * task[NR_TASKS] = {&(init_task.task), };
+
+// 定义了一个全局变量，和 current 类似，用来指向那一段 0 号进程的 TSS 内存。
+// 所有进程都共用这个 tss，每次切换内核栈，把下一个进程的内核栈的选择子保存到这个 tss 的 esp0 中，其它的内容不变。
+struct tss_struct *tss = &(init_task.task.tss);
 
 long user_stack [ PAGE_SIZE>>2 ] ;
 
@@ -105,8 +110,9 @@ void schedule(void)
 {
 	int i,next,c;
 	struct task_struct ** p;
+	struct tast_struct *pnext = &(init_task.task);
 
-/* check alarm, wake up any interruptible tasks that have got a signal */
+	/* check alarm, wake up any interruptible tasks that have got a signal */
 
 	for(p = &LAST_TASK ; p > &FIRST_TASK ; --p)
 		if (*p) {
@@ -130,7 +136,7 @@ void schedule(void)
 			if (!*--p)
 				continue;
 			if ((*p)->state == TASK_RUNNING && (*p)->counter > c)
-				c = (*p)->counter, next = i;
+				c = (*p)->counter, next = i, pnext = *p;
 		}
 		if (c) break;
 		for(p = &LAST_TASK ; p > &FIRST_TASK ; --p)
@@ -138,7 +144,7 @@ void schedule(void)
 				(*p)->counter = ((*p)->counter >> 1) +
 						(*p)->priority;
 	}
-	switch_to(next);
+	switch_to(pnext, _LDT(next));
 }
 
 int sys_pause(void)
