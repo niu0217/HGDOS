@@ -24,6 +24,9 @@ static inline _syscall0(int,fork)
 static inline _syscall0(int,pause)
 static inline _syscall1(int,setup,void *,BIOS)
 static inline _syscall0(int,sync)
+_syscall2(int,mkdir,const char*,name,mode_t,mode)
+_syscall3(int,mknod,const char*,filename,mode_t,mode,dev_t,dev)
+
 
 #include <linux/tty.h>
 #include <linux/sched.h>
@@ -173,6 +176,11 @@ void init(void)
 	(void) open("/dev/tty0",O_RDWR,0);
 	(void) dup(0);
 	(void) dup(0);
+	mkdir("/proc", 0755);
+	mknod("/proc/psinfo", S_IFPROC|0444, 0);
+	mknod("/proc/hdinfo", S_IFPROC|0444, 1);
+	mknod("/proc/inodeinfo", S_IFPROC|0444, 2);
+
 	printf("%d buffers = %d bytes buffer space\n\r",NR_BUFFERS,
 		NR_BUFFERS*BLOCK_SIZE);
 	printf("Free mem: %d bytes\n\r",memory_end-main_memory_start);

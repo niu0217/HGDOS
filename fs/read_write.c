@@ -21,6 +21,8 @@ extern int file_read(struct m_inode * inode, struct file * filp,
 		char * buf, int count);
 extern int file_write(struct m_inode * inode, struct file * filp,
 		char * buf, int count);
+/*新增proc_read函数外部调用*/
+extern int proc_read(int dev, unsigned long * pos, char * buf, int count);
 
 int sys_lseek(unsigned int fd,off_t offset, int origin)
 {
@@ -65,6 +67,8 @@ int sys_read(unsigned int fd,char * buf,int count)
 	inode = file->f_inode;
 	if (inode->i_pipe)
 		return (file->f_mode&1)?read_pipe(inode,buf,count):-EIO;
+	if (S_ISPROC(inode->i_mode))
+		return proc_read(inode->i_zone[0], &file->f_pos, buf, count);
 	if (S_ISCHR(inode->i_mode))
 		return rw_char(READ,inode->i_zone[0],buf,count,&file->f_pos);
 	if (S_ISBLK(inode->i_mode))
