@@ -50,21 +50,22 @@ extern void mem_use(void);
 extern int timer_interrupt(void);
 extern int system_call(void);
 
-union task_union {
-	struct task_struct task;
-	char stack[PAGE_SIZE];
+// 每个任务（进程）在内核态运行时都有自己的内核态堆栈。这里定义了任务的内核态堆栈结构。
+union task_union {	//定义任务联合（任务结构成员和stack字符数组成员）
+	struct task_struct task; //因为一个任务的数据结构与其内核态堆栈在同一个内存页中
+	char stack[PAGE_SIZE];	//所以从堆栈段寄存器ss可以获得其数据段选择符
 };
 
-static union task_union init_task = {INIT_TASK,};
+static union task_union init_task = {INIT_TASK,};	//定义初始任务的数据
 
-long volatile jiffies=0;
-long startup_time=0;
-struct task_struct *current = &(init_task.task);
-struct task_struct *last_task_used_math = NULL;
+long volatile jiffies=0;	//从开机开始算起的滴答数时间值全局变量（10ms/滴答）
+long startup_time = 0; // 开机时间，从1970:0:0:0开始计时的秒数
+struct task_struct *current = &(init_task.task);	//当前任务指针（初始化指向任务0）
+struct task_struct *last_task_used_math = NULL;		//使用过协处理器任务的指针
 
-struct task_struct * task[NR_TASKS] = {&(init_task.task), };
+struct task_struct * task[NR_TASKS] = {&(init_task.task), };	//定义任务指针数组
 
-long user_stack [ PAGE_SIZE>>2 ] ;
+long user_stack [ PAGE_SIZE>>2 ] ;	//定义用户堆栈，共1K项，容量4K字节
 
 struct {
 	long * a;
@@ -104,16 +105,18 @@ void math_state_restore()
 void schedule(void)
 {
 	int i,next,c;
-	struct task_struct ** p;
+	struct task_struct ** p;	//任务结构指针的指针
 
 /* check alarm, wake up any interruptible tasks that have got a signal */
 
+	//从任务数组中最后一个任务开始循环检查alarm，在循环时跳过空指针项
 	for(p = &LAST_TASK ; p > &FIRST_TASK ; --p)
 		if (*p) {
 			if ((*p)->alarm && (*p)->alarm < jiffies) {
 					(*p)->signal |= (1<<(SIGALRM-1));
 					(*p)->alarm = 0;
 				}
+			//如果信号位图中除被阻塞的信号外还有其他信号，并且任务处于可中断状态，则置任务为就绪状态
 			if (((*p)->signal & ~(_BLOCKABLE & (*p)->blocked)) &&
 			(*p)->state==TASK_INTERRUPTIBLE)
 				(*p)->state=TASK_RUNNING;
@@ -126,21 +129,30 @@ void schedule(void)
 		next = 0;
 		i = NR_TASKS;
 		p = &task[NR_TASKS];
+		//从任务数组的最后一个任务开始循环处理，并跳过不包含任务的数组槽。比较每个就绪状态任务
+		//的counter（任务运行时间的递减滴答计数）值，哪一个值大，运行时间还不长，next
+		//就指向哪个的任务号
 		while (--i) {
 			if (!*--p)
 				continue;
 			if ((*p)->state == TASK_RUNNING && (*p)->counter > c)
 				c = (*p)->counter, next = i;
 		}
+		//如果比较得出有counter值不等于0的结果，或者系统中没有一个可运行的任务存在（此时c=-1，next=0）
+		//则退出while循环，否则就根据每个任务的优先权值，更新每一个任务的counter值。
 		if (c) break;
 		for(p = &LAST_TASK ; p > &FIRST_TASK ; --p)
 			if (*p)
 				(*p)->counter = ((*p)->counter >> 1) +
 						(*p)->priority;
 	}
+	//把当前任务指针current指向任务号为next的任务，并切换到该任务中运行；
+	//如果没有任何其他任务可运行时，则运行任务0；
 	switch_to(next);
 }
 
+//pause系统调用。转换当前任务的状态为可中断的等待状态，并重新调度
+//该函数将导致进程进入睡眠状态，直到收到一个信号
 int sys_pause(void)
 {
 	current->state = TASK_INTERRUPTIBLE;
@@ -148,6 +160,9 @@ int sys_pause(void)
 	return 0;
 }
 
+//把当前任务置为不可中断的等待状态，并让睡眠队列头指针指向当前任务
+//只有明确地唤醒时才会返回，该函数提供了进程与中断处理程序之间的同步机制
+//p是等待任务队列头指针
 void sleep_on(struct task_struct **p)
 {
 	struct task_struct *tmp;
@@ -156,14 +171,19 @@ void sleep_on(struct task_struct **p)
 		return;
 	if (current == &(init_task.task))
 		panic("task[0] trying to sleep");
+	//让tmp指向已经在等待队列上的任务（如果有的话），比如inode->i_wait。并且将睡眠队列头的等待指针
+	//指向当前任务。这样就把当前任务插入到了*p的等待队列中，然后将当前任务置为不可中断的等待状态，
+	//并重新调度
 	tmp = *p;
 	*p = current;
 	current->state = TASK_UNINTERRUPTIBLE;
 	schedule();
+	*p = tmp;
 	if (tmp)
 		tmp->state=0;
 }
 
+//将当前任务置为可中断的等待状态，并放入*p指定的等待队列中
 void interruptible_sleep_on(struct task_struct **p)
 {
 	struct task_struct *tmp;
@@ -172,24 +192,33 @@ void interruptible_sleep_on(struct task_struct **p)
 		return;
 	if (current == &(init_task.task))
 		panic("task[0] trying to sleep");
+	// 让tmp指向已经在等待队列上的任务（如果有的话），比如inode->i_wait。并且将睡眠队列头的等待指针
+	// 指向当前任务。这样就把当前任务插入到了*p的等待队列中，然后将当前任务置为可中断的等待状态，
+	// 并重新调度
 	tmp=*p;
 	*p=current;
 repeat:	current->state = TASK_INTERRUPTIBLE;
 	schedule();
+	//只有当这个等待任务被唤醒时，程序才又会返回这里，表示进程已被明确地唤醒并执行。
+	//如果等待队列中还有等待任务，并且队列头指针所指向的任务不是当前任务时，则将该
+	//等待任务置为可运行的就绪状态，并重新执行调度程序。当指针*p所指向的不是当前任务时
+	//表示在当前任务被放入队列后，又有新的任务被插入等待队列前部。因为我们先唤醒它们，而
+	//让自己仍然等待。等待这些后续进入队列的任务被唤醒执行时来唤醒本任务。于是去执行重新调度
 	if (*p && *p != current) {
 		(**p).state=0;
 		goto repeat;
 	}
-	*p=NULL;
+	*p = tmp;
 	if (tmp)
 		tmp->state=0;
 }
 
+//唤醒*p指向的任务。*p是任务等待队列头指针。由于新等待任务是插入在等待队列头指针处的
+//因此唤醒的是最后进入等待队列的任务
 void wake_up(struct task_struct **p)
 {
 	if (p && *p) {
 		(**p).state=0;
-		*p=NULL;
 	}
 }
 
