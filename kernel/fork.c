@@ -17,17 +17,29 @@
 #include <asm/segment.h>
 #include <asm/system.h>
 
+// 写页面验证。若页面不可写，则复制页面
 extern void write_verify(unsigned long address);
 
-long last_pid=0;
+long last_pid = 0; // 最新进程号，其值由find_empty_process()生成
 
+// 进程空间区域写前验证函数
+// 该函数对当前进程逻辑地址从addr到addr+size这一段范围以页为单位执行写操作前的检测操作。
+// 由于检测判断是以页面为单位进行操作，因此程序首先需要找出addr所载页面开始地址start，
+// 然后start加上进程数据段基址，使这个start变换成CPU 4G线性地址空间中的地址。
+// 最后循环调用write_verify对指定大小的内存空间进行写前验证。若页面是只读的，则
+// 执行共享检验和复制页面操作（写时复制）
 void verify_area(void * addr,int size)
 {
 	unsigned long start;
 
+	// 首先将起始地址start调整为其所在页的左边界开始位置，同时相应地调整验证区域大小
+	// start & 0xfff用于获得指定起始位置addr（也就是start）在所在页面中的偏移值。
+	// 原验证范围size加上这个偏移值即扩展成addr所在页面起始位置开始的范围值。
 	start = (unsigned long) addr;
 	size += start & 0xfff;
-	start &= 0xfffff000;
+	start &= 0xfffff000;	// 此时start是当前进程空间中的逻辑地址
+	// 把start加上进程数据段在线性地址空间中的起始基址，变成系统整个线性空间中的
+	// 地址位置
 	start += get_base(current->ldt[2]);
 	while (size>0) {
 		size -= 4096;
@@ -36,11 +48,21 @@ void verify_area(void * addr,int size)
 	}
 }
 
+// 复制内存页表
+// 参数nr是新任务号；p是新任务数据结构指针。
+// 该函数为新任务在线性地址空间中设置代码段和数据段基址、限长，并复制页表。由于Linux
+// 系统采用了写时复制技术，因此这里仅为新进程设置自己的页目录项和页表项，而没有实际为
+// 新进程分配物理内存页面。此时新进程与其父进程共享所有内存页面。
+// 操作成功返回0，失败返回出错号
 int copy_mem(int nr,struct task_struct * p)
 {
 	unsigned long old_data_base,new_data_base,data_limit;
 	unsigned long old_code_base,new_code_base,code_limit;
 
+	// 首先取当前进程局部描述符中代码段和数据段描述符项中的段限长（字节数）
+	// 0x0f是代码段选择符；0x17是数据段选择符；
+	// 然后取当前进程代码段和数据段在线性地址空间中的基地址。由于Linux0.11内核还不支持
+	// 代码和数据段分立的情况，因此这里需要检查代码段和数据段基址和限长是否都分别相同
 	code_limit=get_limit(0x0f);
 	data_limit=get_limit(0x17);
 	old_code_base = get_base(current->ldt[1]);
@@ -49,6 +71,10 @@ int copy_mem(int nr,struct task_struct * p)
 		panic("We don't support separate I&D");
 	if (data_limit < code_limit)
 		panic("Bad data_limit");
+	// 然后设置创建中的新进程在线性地址空间中的基地址等于（64MB*其任务号），并用该值
+	// 设置新进程局部描述符表中段描述符中的基地址。接着设置新进程的页目录项和页表项，即
+	// 复制当前进程（父进程）的页目录项和页表项。此时子进程共享父进程的内存页面。
+	// 正常情况下copy_page_tables返回0，否则表示出错，则释放刚申请的页表项
 	new_data_base = new_code_base = nr * 0x4000000;
 	p->start_code = new_code_base;
 	set_base(p->ldt[1],new_code_base);
@@ -66,6 +92,8 @@ int copy_mem(int nr,struct task_struct * p)
  * information (task[nr]) and sets up the necessary registers. It
  * also copies the data segment in it's entirety.
  */
+// 复制进程
+// 参数nr是调用find_empty_process()分配的任务数组项号
 int copy_process(int nr,long ebp,long edi,long esi,long gs,long none,
 		long ebx,long ecx,long edx,
 		long fs,long es,long ds,
@@ -75,21 +103,26 @@ int copy_process(int nr,long ebp,long edi,long esi,long gs,long none,
 	int i;
 	struct file *f;
 
+	// 首先为新任务数据结构分配内存。如果分配内存错误，则返回出错码并退出。然后将新任务结构
+	// 指针放入任务数组的nr项中。其中nr为任务号，由前面的find_empty_process()返回。
+	// 接着把当前进程任务结构内容复制到刚申请的内存页面p开始处
 	p = (struct task_struct *) get_free_page();
 	if (!p)
 		return -EAGAIN;
 	task[nr] = p;
+	// 这样做不会复制超级用户堆栈（只复制进程结构）
 	*p = *current;	/* NOTE! this doesn't copy the supervisor stack */
 	p->state = TASK_UNINTERRUPTIBLE;
-	p->pid = last_pid;
-	p->father = current->pid;
-	p->counter = p->priority;
-	p->signal = 0;
-	p->alarm = 0;
+	p->pid = last_pid; // 新进程号，其值由ind_empty_process()返回
+	p->father = current->pid;	// 设置父进程号
+	p->counter = p->priority;	// 运行时间片值
+	p->signal = 0;	// 信号位图置0
+	p->alarm = 0;	// 报警定时值（滴答数）
 	p->leader = 0;		/* process leadership doesn't inherit */
-	p->utime = p->stime = 0;
-	p->cutime = p->cstime = 0;
-	p->start_time = jiffies;
+	p->utime = p->stime = 0;	// 用户态时间和核心态运行时间
+	p->cutime = p->cstime = 0;	// 子进程用户态和核心态运行时间
+	p->start_time = jiffies;	// 进程开始运行时间（当前时间滴答数）
+	// 更改任务状态段TSS数据
 	p->tss.back_link = 0;
 	p->tss.esp0 = PAGE_SIZE + (long) p;
 	p->tss.ss0 = 0x10;
@@ -111,13 +144,18 @@ int copy_process(int nr,long ebp,long edi,long esi,long gs,long none,
 	p->tss.gs = gs & 0xffff;
 	p->tss.ldt = _LDT(nr);
 	p->tss.trace_bitmap = 0x80000000;
+	// 如果当前任务使用了协处理器，就保存其上下文
 	if (last_task_used_math == current)
 		__asm__("clts ; fnsave %0"::"m" (p->tss.i387));
+	// 复制进程页表
 	if (copy_mem(nr,p)) {
 		task[nr] = NULL;
 		free_page((long) p);
 		return -EAGAIN;
 	}
+	// 如果父进程中有文件是打开的，则将对应文件的打开次数加1。因为这里创建的子进程会与
+	// 父进程共享这些打开的文件。将当前进程（父进程）的pwd、root和executable引用次数
+	// 也加1，一样的道理。
 	for (i=0; i<NR_OPEN;i++)
 		if ((f=p->filp[i]))
 			f->f_count++;
@@ -127,21 +165,29 @@ int copy_process(int nr,long ebp,long edi,long esi,long gs,long none,
 		current->root->i_count++;
 	if (current->executable)
 		current->executable->i_count++;
+	// 在GDT表中设置新任务TSS段和LDT段描述符项
 	set_tss_desc(gdt+(nr<<1)+FIRST_TSS_ENTRY,&(p->tss));
 	set_ldt_desc(gdt+(nr<<1)+FIRST_LDT_ENTRY,&(p->ldt));
 	p->state = TASK_RUNNING;	/* do this last, just in case */
 	return last_pid;
 }
 
+// 为新进程取得不重复的进程号last_pid。函数返回在任务数组中的任务号（数组项）
 int find_empty_process(void)
 {
 	int i;
 
+	// 首先获取新的进程号，如果last_pid增加1后超出进程号的正数表示范围，则重新
+	// 从1开始使用pid号。然后在任务数组中搜索刚设置的pid号是否已经被任何任务使用，
+	// 如果是则跳转到函数开始处重新获得一个pid号。接着在任务数组中为新任务寻找一个
+	// 空闲项，并返回项号
+	// last_pid是一个全局变量，不再返回，如果此时任务数组中的64项已经被全部占用，
+	// 则返回出错码
 	repeat:
 		if ((++last_pid)<0) last_pid=1;
 		for(i=0 ; i<NR_TASKS ; i++)
 			if (task[i] && task[i]->pid == last_pid) goto repeat;
-	for(i=1 ; i<NR_TASKS ; i++)
+	for(i=1 ; i<NR_TASKS ; i++)	// 任务0被排除在外
 		if (!task[i])
 			return i;
 	return -EAGAIN;
