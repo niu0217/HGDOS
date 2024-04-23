@@ -54,6 +54,7 @@ static long HIGH_MEMORY = 0;
 #define copy_page(from,to) \
 __asm__("cld ; rep ; movsl"::"S" (from),"D" (to),"c" (1024))
 
+// 表示物理内存页面的状态，每个字节描述一个物理内存页的占用状态
 static unsigned char mem_map [ PAGING_PAGES ] = {0,};
 
 /*
